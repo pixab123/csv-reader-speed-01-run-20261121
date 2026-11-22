@@ -1,3 +1,5 @@
+const DELIM = /[,\n\r]/g;
+
 export function run(input) {
   const s = input.text;
   const header = input.header;
@@ -10,21 +12,19 @@ export function run(input) {
   let line = 1;
   let first = true;
   let firstWidth = 0;
+  const hasCR = s.indexOf("\r") !== -1;
 
   while (i < n) {
-    // Skip stray CRs and empty lines at record start; they form no record.
-    let skippedStray = false;
+    // Skip empty lines and stray CRs at record start; they form no record.
     for (;;) {
       if (i >= n) break;
       const c = s.charCodeAt(i);
       if (c === 10) { i++; line++; continue; }
       if (c === 13) {
         if (i + 1 < n && s.charCodeAt(i + 1) === 10) { i += 2; line++; continue; }
-        // stray CR before any record content
         const prow = first && header ? null : rows.length;
         errors.push({ code: "stray_cr", line: line, row: prow });
         i++;
-        skippedStray = true;
         continue;
       }
       break;
@@ -34,13 +34,13 @@ export function run(input) {
     const recLine = line;
     const recRow = first && header ? null : rows.length;
     const fields = [];
-    let term = 0; // 1 comma, 2 eol, 3 eof
+    let term = 3; // 1 comma, 2 eol, 3 eof
 
-    // Parse fields of one record.
     for (;;) {
       let field = "";
       term = 3;
-      if (i < n && s.charCodeAt(i) === 34) {
+      let quotedDone = false;
+      if (s.charCodeAt(i) === 34) {
         // Quoted attempt: locate a closing quote that is not doubled.
         let j = i + 1;
         let closing = -1;
@@ -53,45 +53,35 @@ export function run(input) {
         }
         if (closing === -1) {
           errors.push({ code: "unterminated_quote", line: recLine, row: recRow });
-          // Fall through to unquoted parsing starting at i (quote literal).
         } else {
-          // Build quoted content from (i+1 .. closing-1).
           const a = i + 1;
           const b = closing;
-          let content;
-          if (b === a) {
-            content = "";
-          } else {
-            // Fast scan for escape pairs or CR inside the segment.
-            let hasSpecial = false;
-            // A doubled quote inside means a '"' appears before b as part of a pair;
-            // detect by checking whether the closing scan passed any pair.
-            // Simpler: search for '"' and '\r' in segment.
-            const qIn = s.indexOf('"', a);
-            const rIn = s.indexOf("\r", a);
-            if ((qIn === -1 || qIn >= b) && (rIn === -1 || rIn >= b)) {
-              content = s.slice(a, b);
-              // Count LF for line tracking.
-              let p = s.indexOf("\n", a);
-              while (p !== -1 && p < b) { line++; p = s.indexOf("\n", p + 1); }
+          let content = "";
+          if (b > a) {
+            const seg = s.slice(a, b);
+            const qIn = seg.indexOf('"');
+            const rIn = seg.indexOf("\r");
+            if (qIn === -1 && rIn === -1) {
+              content = seg;
+              let p = seg.indexOf("\n");
+              while (p !== -1) { line++; p = seg.indexOf("\n", p + 1); }
             } else {
-              hasSpecial = true;
               const parts = [];
-              let chunk = a;
-              let k = a;
-              while (k < b) {
-                const ch = s.charCodeAt(k);
+              let chunk = 0;
+              let k = 0;
+              const m = seg.length;
+              while (k < m) {
+                const ch = seg.charCodeAt(k);
                 if (ch === 34) {
-                  // doubled quote -> one quote
-                  if (chunk < k) parts.push(s.slice(chunk, k));
+                  if (chunk < k) parts.push(seg.slice(chunk, k));
                   parts.push('"');
                   k += 2;
                   chunk = k;
                 } else if (ch === 13) {
-                  if (chunk < k) parts.push(s.slice(chunk, k));
+                  if (chunk < k) parts.push(seg.slice(chunk, k));
                   parts.push("\n");
                   line++;
-                  if (k + 1 < b && s.charCodeAt(k + 1) === 10) k += 2; else k += 1;
+                  if (k + 1 < m && seg.charCodeAt(k + 1) === 10) k += 2; else k += 1;
                   chunk = k;
                 } else if (ch === 10) {
                   line++;
@@ -100,84 +90,100 @@ export function run(input) {
                   k++;
                 }
               }
-              if (chunk < b) parts.push(s.slice(chunk, b));
+              if (chunk < m) parts.push(seg.slice(chunk, m));
               content = parts.length === 1 ? parts[0] : parts.join("");
             }
           }
           i = closing + 1;
-          // Junk after closing quote, up to comma or line break.
+          // Junk after the closing quote, up to a comma or a line break.
           let junk = "";
           let hasJunk = false;
           for (;;) {
             if (i >= n) { term = 3; break; }
-            // Find next delimiter among , \n \r
-            let dComma = s.indexOf(",", i);
-            let dNl = s.indexOf("\n", i);
-            let dCr = s.indexOf("\r", i);
-            let d = -1; let kind = 0;
-            if (dComma !== -1) { d = dComma; kind = 1; }
-            if (dNl !== -1 && (d === -1 || dNl < d)) { d = dNl; kind = 2; }
-            if (dCr !== -1 && (d === -1 || dCr < d)) { d = dCr; kind = 3; }
-            if (d === -1) {
-              if (i < n) { junk += s.slice(i); hasJunk = true; }
-              i = n; term = 3; break;
+            let d;
+            if (!hasCR) {
+              const dc = s.indexOf(",", i);
+              const dn = s.indexOf("\n", i);
+              d = dc === -1 ? dn : dn === -1 ? dc : dc < dn ? dc : dn;
+              if (d === -1) {
+                junk += s.slice(i);
+                hasJunk = true;
+                i = n; term = 3; break;
+              }
+            } else {
+              DELIM.lastIndex = i;
+              const mm = DELIM.exec(s);
+              if (!mm) {
+                junk += s.slice(i);
+                hasJunk = true;
+                i = n; term = 3; break;
+              }
+              d = mm.index;
             }
-            if (kind === 1) {
+            const code = s.charCodeAt(d);
+            if (code === 44) {
               if (d > i) { junk += s.slice(i, d); hasJunk = true; }
               i = d + 1; term = 1; break;
             }
-            if (kind === 2) {
+            if (code === 10) {
               if (d > i) { junk += s.slice(i, d); hasJunk = true; }
               i = d + 1; line++; term = 2; break;
             }
-            // CR
             if (d + 1 < n && s.charCodeAt(d + 1) === 10) {
               if (d > i) { junk += s.slice(i, d); hasJunk = true; }
               i = d + 2; line++; term = 2; break;
             }
-            // lone CR inside junk: dropped as stray, junk continues
+            // Lone CR inside junk: dropped as stray, junk continues.
             if (d > i) { junk += s.slice(i, d); hasJunk = true; }
             errors.push({ code: "stray_cr", line: recLine, row: recRow });
             i = d + 1;
           }
           field = hasJunk ? content + junk : content;
           if (hasJunk) errors.push({ code: "quote_junk", line: recLine, row: recRow });
-          fields.push(field);
-          if (term === 1) continue;
-          break;
+          quotedDone = true;
         }
       }
-      // Unquoted field parsing (also the unterminated fallback).
-      {
+      if (!quotedDone) {
+        // Unquoted field (also the unterminated-quote fallback).
         let parts = null;
         let chunk = i;
         for (;;) {
-          if (i >= n) { term = 3; break; }
-          let dComma = s.indexOf(",", i);
-          let dNl = s.indexOf("\n", i);
-          let dCr = s.indexOf("\r", i);
-          let d = -1; let kind = 0;
-          if (dComma !== -1) { d = dComma; kind = 1; }
-          if (dNl !== -1 && (d === -1 || dNl < d)) { d = dNl; kind = 2; }
-          if (dCr !== -1 && (d === -1 || dCr < d)) { d = dCr; kind = 3; }
-          if (d === -1) {
+          if (i >= n) {
             if (parts) parts.push(s.slice(chunk, n)); else field = s.slice(chunk, n);
-            i = n; term = 3; break;
+            term = 3; break;
           }
-          if (kind === 1) {
+          let d;
+          if (!hasCR) {
+            const dc = s.indexOf(",", i);
+            const dn = s.indexOf("\n", i);
+            d = dc === -1 ? dn : dn === -1 ? dc : dc < dn ? dc : dn;
+            if (d === -1) {
+              if (parts) parts.push(s.slice(chunk, n)); else field = s.slice(chunk, n);
+              i = n; term = 3; break;
+            }
+          } else {
+            DELIM.lastIndex = i;
+            const mm = DELIM.exec(s);
+            if (!mm) {
+              if (parts) parts.push(s.slice(chunk, n)); else field = s.slice(chunk, n);
+              i = n; term = 3; break;
+            }
+            d = mm.index;
+          }
+          const code = s.charCodeAt(d);
+          if (code === 44) {
             if (parts) parts.push(s.slice(chunk, d)); else field = s.slice(chunk, d);
             i = d + 1; term = 1; break;
           }
-          if (kind === 2) {
+          if (code === 10) {
             if (parts) parts.push(s.slice(chunk, d)); else field = s.slice(chunk, d);
             i = d + 1; line++; term = 2; break;
           }
-          // CR
           if (d + 1 < n && s.charCodeAt(d + 1) === 10) {
             if (parts) parts.push(s.slice(chunk, d)); else field = s.slice(chunk, d);
             i = d + 2; line++; term = 2; break;
           }
-          // stray CR: drop it, keep scanning the same field
+          // Stray CR: drop it, keep scanning the same field.
           if (!parts) parts = [];
           parts.push(s.slice(chunk, d));
           errors.push({ code: "stray_cr", line: recLine, row: recRow });
@@ -185,13 +191,12 @@ export function run(input) {
           chunk = i;
         }
         if (parts) field = parts.join("");
-        fields.push(field);
-        if (term === 1) continue;
-        break;
       }
+      fields.push(field);
+      if (term === 1) continue;
+      break;
     }
 
-    // Finish record.
     if (first) {
       firstWidth = fields.length;
       first = false;
